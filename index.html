@@ -1779,16 +1779,29 @@ function decodeScore(valueBig) {
   return { round: Number(s.slice(2, 8)), wave: Number(s.slice(8, 10)), score: Number(s.slice(10)) };
 }
 
+async function rpcOnce(url, method, params) {
+  const c = new AbortController();
+  const timer = setTimeout(() => c.abort(), 15000);
+  try {
+    const r = await fetch(url, { method: 'POST', signal: c.signal, headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error.message || 'rpc error');
+    return j.result;
+  } finally { clearTimeout(timer); }
+}
+// Each endpoint gets up to 3 attempts with backoff (public gateways rate-limit bursts).
 async function rpc(method, params) {
   let lastErr;
   for (const url of SQK.RPCS) {
-    try {
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
-      const j = await r.json();
-      if (j.error) throw new Error(j.error.message || 'rpc error');
-      return j.result;
-    } catch (e) { lastErr = e; }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { return await rpcOnce(url, method, params); }
+      catch (e) {
+        lastErr = e;
+        if (/pruned/i.test(e.message || '')) break;
+        await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
+      }
+    }
   }
   throw lastErr;
 }
@@ -1861,13 +1874,20 @@ async function loadOnchainScores() {
   const latestHex = await rpc('eth_blockNumber', []);
   const latest = parseInt(latestHex, 16);
   const span = 7 * 7200;
-  const chunk = 25000;
+  const chunk = 12600;
   const logs = [];
-  for (let from = latest - span; from <= latest; from += chunk) {
-    const to = Math.min(latest, from + chunk - 1);
-    const part = await rpc('eth_getLogs', [{ address: SQK.TOKEN, topics: [SQK.APPROVAL_TOPIC],
-      fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) }]);
-    logs.push(...part);
+  let ok = 0, failed = 0;
+  // newest chunk first, so "this round" survives even if an old range fails
+  for (let to = latest; to > latest - span; to -= chunk) {
+    const from = Math.max(latest - span, to - chunk + 1);
+    try {
+      const part = await rpc('eth_getLogs', [{ address: SQK.TOKEN, topics: [SQK.APPROVAL_TOPIC],
+        fromBlock: '0x' + from.toString(16), toBlock: '0x' + to.toString(16) }]);
+      logs.push(...part); ok++;
+    } catch (e) {
+      if (ok === 0) throw e;
+      failed++;
+    }
   }
   const raw = [];
   for (const l of logs) {
@@ -1878,13 +1898,16 @@ async function loadOnchainScores() {
   }
   raw.sort((a, b) => b.score - a.score);
   // Verify the round claim against the real block time (top candidates only).
-  const blocks = [...new Set(raw.slice(0, 80).map(e => e.block))];
+  const top = raw.slice(0, 60);
+  const blocks = [...new Set(top.map(e => e.block))];
   const ts = {};
-  await Promise.all(blocks.map(async bn => {
-    const b = await rpc('eth_getBlockByNumber', ['0x' + bn.toString(16), false]).catch(() => null);
-    if (b) ts[bn] = parseInt(b.timestamp, 16);
-  }));
-  const entries = raw.slice(0, 80).filter(e => {
+  for (let i = 0; i < blocks.length; i += 4) {
+    await Promise.all(blocks.slice(i, i + 4).map(async bn => {
+      const b = await rpc('eth_getBlockByNumber', ['0x' + bn.toString(16), false]).catch(() => null);
+      if (b) ts[bn] = parseInt(b.timestamp, 16);
+    }));
+  }
+  const entries = top.filter(e => {
     if (!ts[e.block]) return false;
     const txRound = Math.floor((ts[e.block] - SQK.GENESIS_TS) / SQK.ROUND_SECONDS);
     return txRound >= e.round && txRound <= e.round + 3;
