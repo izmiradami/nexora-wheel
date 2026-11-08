@@ -498,8 +498,8 @@
     <h2>🏆 Onchain Leaderboard</h2>
     <div class="lb-sub">Scores live in the official $SQK contract on Sepolia, bound to the real 10-minute Core round they were played in.</div>
     <div class="lb-tabs">
-      <button class="lb-tab active" data-tab="round" onclick="setLbTab('round')">THIS ROUND</button>
-      <button class="lb-tab" data-tab="today" onclick="setLbTab('today')">24H</button>
+      <button class="lb-tab active" data-tab="today" onclick="setLbTab('today')">24H</button>
+      <button class="lb-tab" data-tab="round" onclick="setLbTab('round')">THIS ROUND</button>
       <button class="lb-tab" data-tab="week" onclick="setLbTab('week')">7 DAYS</button>
     </div>
     <div class="leaderboard" id="leaderboardList">
@@ -1916,7 +1916,7 @@ async function loadOnchainScores() {
   return entries;
 }
 
-let lbTab = 'round';
+let lbTab = 'today';
 function setLbTab(tab) { lbTab = tab; playSound('click'); renderLeaderboard(); }
 
 async function renderLeaderboard() {
